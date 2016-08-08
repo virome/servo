@@ -31,7 +31,7 @@ pub fn traverse_dom<N, C>(root: N,
             }
         }
 
-        if context.should_traverse_back_up() {
+        if context.has_postorder_traversal() {
             context.process_postorder(node);
         }
     }

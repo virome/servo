@@ -39,5 +39,5 @@ impl<'lc, 'ln> DomTraversalContext<GeckoNode<'ln>> for RecalcStyleOnly<'lc> {
     fn process_postorder(&self, _: GeckoNode<'ln>) {}
 
     /// We don't use the post-order traversal for anything.
-    fn should_traverse_back_up(&self) -> bool { false }
+    fn has_postorder_traversal(&self) -> bool { false }
 }

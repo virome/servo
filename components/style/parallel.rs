@@ -94,7 +94,7 @@ fn top_down_dom<N, C>(unsafe_nodes: UnsafeNodeList,
 
         // Reset the count of children if we need to do a bottom-up traversal
         // after the top up.
-        if context.should_traverse_back_up() {
+        if context.has_postorder_traversal() {
             {
                 let data = node.mutate_data().unwrap();
                 data.parallel.children_to_process
