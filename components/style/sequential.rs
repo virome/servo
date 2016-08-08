@@ -5,7 +5,7 @@
 //! Implements sequential traversal over the DOM tree.
 
 use dom::TNode;
-use traversal::DomTraversalContext;
+use traversal::{RestyleResult, DomTraversalContext};
 
 pub fn traverse_dom<N, C>(root: N,
                           shared: &C::SharedContext)
@@ -17,16 +17,23 @@ pub fn traverse_dom<N, C>(root: N,
               C: DomTraversalContext<N>
     {
         debug_assert!(context.should_process(node));
-        context.process_preorder(node);
+        let should_stop = match context.process_preorder(node) {
+            RestyleResult::Stop => true,
+            RestyleResult::Continue => false,
+        };
 
-        for kid in node.children() {
-            context.pre_process_child_hook(node, kid);
-            if context.should_process(kid) {
-                doit::<N, C>(context, kid);
+        if !should_stop {
+            for kid in node.children() {
+                context.pre_process_child_hook(node, kid);
+                if context.should_process(kid) {
+                    doit::<N, C>(context, kid);
+                }
             }
         }
 
-        context.process_postorder(node);
+        if context.has_postorder_traversal() {
+            context.process_postorder(node);
+        }
     }
 
     let context = C::new(shared, root.opaque());

@@ -12,6 +12,7 @@ use cache::{LRUCache, SimpleHashCache};
 use context::{StyleContext, SharedStyleContext};
 use data::PrivateStyleData;
 use dom::{TElement, TNode, TRestyleDamage};
+use properties::longhands::display::computed_value as display;
 use properties::{ComputedValues, PropertyDeclaration, cascade};
 use selector_impl::{ElementExt, SelectorImplExt, TheSelectorImpl, PseudoElement};
 use selector_matching::{DeclarationBlock, Stylist};
@@ -26,6 +27,7 @@ use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::slice::Iter;
 use std::sync::Arc;
 use string_cache::{Atom, Namespace};
+use traversal::RestyleResult;
 use util::opts;
 
 fn create_common_style_affecting_attributes_from_element<E: TElement>(element: &E)
@@ -356,9 +358,9 @@ impl StyleSharingCandidateCache {
 pub enum StyleSharingResult<ConcreteRestyleDamage: TRestyleDamage> {
     /// We didn't find anybody to share the style with.
     CannotShare,
-    /// The node's style can be shared. The integer specifies the index in the LRU cache that was
-    /// hit and the damage that was done.
-    StyleWasShared(usize, ConcreteRestyleDamage),
+    /// The node's style can be shared. The integer specifies the index in the
+    /// LRU cache that was hit and the damage that was done.
+    StyleWasShared(usize, ConcreteRestyleDamage, RestyleResult),
 }
 
 trait PrivateMatchMethods: TNode
@@ -371,22 +373,22 @@ trait PrivateMatchMethods: TNode
                                             context: &Ctx,
                                             parent_style: Option<&Arc<ComputedValues>>,
                                             applicable_declarations: &[DeclarationBlock],
-                                            mut style: Option<&mut Arc<ComputedValues>>,
+                                            mut old_style: Option<&mut Arc<ComputedValues>>,
                                             applicable_declarations_cache:
                                              &mut ApplicableDeclarationsCache,
                                             shareable: bool,
                                             animate_properties: bool)
-                                            -> (Self::ConcreteRestyleDamage, Arc<ComputedValues>)
-    where Ctx: StyleContext<'a> {
+                                            -> Arc<ComputedValues>
+        where Ctx: StyleContext<'a>
+    {
         let mut cacheable = true;
         let shared_context = context.shared_context();
         if animate_properties {
             cacheable = !self.update_animations_for_cascade(shared_context,
-                                                            &mut style) && cacheable;
+                                                            &mut old_style) && cacheable;
         }
 
-        let this_style;
-        match parent_style {
+        let (this_style, is_cacheable) = match parent_style {
             Some(ref parent_style) => {
                 let cache_entry = applicable_declarations_cache.find(applicable_declarations);
                 let cached_computed_values = match cache_entry {
@@ -394,26 +396,24 @@ trait PrivateMatchMethods: TNode
                     None => None,
                 };
 
-                let (the_style, is_cacheable) = cascade(shared_context.viewport_size,
-                                                        applicable_declarations,
-                                                        shareable,
-                                                        Some(&***parent_style),
-                                                        cached_computed_values,
-                                                        shared_context.error_reporter.clone());
-                cacheable = cacheable && is_cacheable;
-                this_style = the_style
+                cascade(shared_context.viewport_size,
+                        applicable_declarations,
+                        shareable,
+                        Some(&***parent_style),
+                        cached_computed_values,
+                        shared_context.error_reporter.clone())
             }
             None => {
-                let (the_style, is_cacheable) = cascade(shared_context.viewport_size,
-                                                        applicable_declarations,
-                                                        shareable,
-                                                        None,
-                                                        None,
-                                                        shared_context.error_reporter.clone());
-                cacheable = cacheable && is_cacheable;
-                this_style = the_style
+                cascade(shared_context.viewport_size,
+                        applicable_declarations,
+                        shareable,
+                        None,
+                        None,
+                        shared_context.error_reporter.clone())
             }
         };
+
+        cacheable = cacheable && is_cacheable;
 
         let mut this_style = Arc::new(this_style);
 
@@ -429,7 +429,7 @@ trait PrivateMatchMethods: TNode
 
             // Trigger transitions if necessary. This will reset `this_style` back
             // to its old value if it did trigger a transition.
-            if let Some(ref style) = style {
+            if let Some(ref style) = old_style {
                 animations_started |=
                     animation::start_transitions_if_applicable(
                         new_animations_sender,
@@ -443,21 +443,13 @@ trait PrivateMatchMethods: TNode
         }
 
 
-        let existing_style =
-            self.existing_style_for_restyle_damage(style.map(|s| &*s));
-
-        // Calculate style difference.
-        let damage =
-            Self::ConcreteRestyleDamage::compute(existing_style, &this_style);
-
         // Cache the resolved style if it was cacheable.
         if cacheable {
             applicable_declarations_cache.insert(applicable_declarations.to_vec(),
                                                  this_style.clone());
         }
 
-        // Return the final style and the damage done to our caller.
-        (damage, this_style)
+        this_style
     }
 
     fn update_animations_for_cascade(&self,
@@ -594,16 +586,30 @@ pub trait ElementMatchMethods : TElement {
 
                 let style = &mut node.mutate_data().unwrap().style;
 
-                let damage = {
-                    let source =
-                        node.existing_style_for_restyle_damage((*style).as_ref());
-                    let damage = <<Self as TElement>::ConcreteNode as TNode>
-                                     ::ConcreteRestyleDamage::compute(source, &shared_style);
-                    damage
+                let damage =
+                    match node.existing_style_for_restyle_damage((*style).as_ref()) {
+                        Some(ref source) => {
+                            <<Self as TElement>::ConcreteNode as TNode>
+                            ::ConcreteRestyleDamage::compute(source, &shared_style)
+                        }
+                        None => {
+                            debug_assert!(style.is_none() ||
+                                          style.as_ref().unwrap().get_box().clone_display() == display::T::none);
+
+                            <<Self as TElement>::ConcreteNode as TNode>
+                            ::ConcreteRestyleDamage::rebuild_and_reflow()
+                        }
+                    };
+
+                let restyle_result = if shared_style.get_box().clone_display() == display::T::none {
+                    RestyleResult::Stop
+                } else {
+                    RestyleResult::Continue
                 };
 
                 *style = Some(shared_style);
-                return StyleSharingResult::StyleWasShared(i, damage)
+
+                return StyleSharingResult::StyleWasShared(i, damage, restyle_result)
             }
         }
 
@@ -663,11 +669,43 @@ pub trait MatchMethods : TNode {
         }
     }
 
+    fn compute_restyle_damage(&self,
+                              old_style: Option<&Arc<ComputedValues>>,
+                              new_style: &Arc<ComputedValues>) -> Self::ConcreteRestyleDamage {
+        match self.existing_style_for_restyle_damage(old_style) {
+            Some(ref source) => {
+                Self::ConcreteRestyleDamage::compute(source,
+                                                     new_style)
+            }
+            None => {
+                // If there's no style source, two things can happen:
+                //
+                //  1. This is not an incremental restyle (old_style is none).
+                //     In this case we can't do too much than sending
+                //     rebuild_and_reflow.
+                //
+                //  2. This is an incremental restyle, but the old display value
+                //     is none, so there's no effective way for gecko to get the
+                //     style source. In this case, we could return either
+                //     RestyleDamage::empty(), in the case both displays are
+                //     none, or rebuild_and_reflow, otherwise. The first case
+                //     should be already handled when calling this function, so
+                //     we can assert that the new display value is not none.
+                debug_assert!(old_style.is_none() ||
+                              old_style.unwrap().get_box().clone_display() == display::T::none);
+                debug_assert!(new_style.get_box().clone_display() != display::T::none);
+                Self::ConcreteRestyleDamage::rebuild_and_reflow()
+            }
+        }
+    }
+
     unsafe fn cascade_node<'a, Ctx>(&self,
                                     context: &Ctx,
                                     parent: Option<Self>,
                                     applicable_declarations: &ApplicableDeclarations)
-    where Ctx: StyleContext<'a> {
+                                    -> RestyleResult
+        where Ctx: StyleContext<'a>
+    {
         // Get our parent's style. This must be unsafe so that we don't touch the parent's
         // borrow flags.
         //
@@ -684,72 +722,148 @@ pub trait MatchMethods : TNode {
         let mut applicable_declarations_cache =
             context.local_context().applicable_declarations_cache.borrow_mut();
 
-        let damage;
-        if self.is_text_node() {
+        let (damage, restyle_result) = if self.is_text_node() {
             let mut data_ref = self.mutate_data().unwrap();
             let mut data = &mut *data_ref;
             let cloned_parent_style = ComputedValues::style_for_child_text_node(parent_style.unwrap());
 
-            {
-                let existing_style =
-                    self.existing_style_for_restyle_damage(data.style.as_ref());
-                damage = Self::ConcreteRestyleDamage::compute(existing_style,
-                                                              &cloned_parent_style);
-            }
+            let damage =
+                self.compute_restyle_damage(data.style.as_ref(), &cloned_parent_style);
 
             data.style = Some(cloned_parent_style);
+
+            (damage, RestyleResult::Continue)
         } else {
-            damage = {
-                let mut data_ref = self.mutate_data().unwrap();
-                let mut data = &mut *data_ref;
-                let (mut damage, final_style) = self.cascade_node_pseudo_element(
-                    context,
-                    parent_style,
-                    &applicable_declarations.normal,
-                    data.style.as_mut(),
-                    &mut applicable_declarations_cache,
-                    applicable_declarations.normal_shareable,
-                    true);
+            let mut data_ref = self.mutate_data().unwrap();
+            let mut data = &mut *data_ref;
+            let final_style =
+                self.cascade_node_pseudo_element(context, parent_style,
+                                                 &applicable_declarations.normal,
+                                                 data.style.as_mut(),
+                                                 &mut applicable_declarations_cache,
+                                                 applicable_declarations.normal_shareable,
+                                                 /* should_animate = */ true);
 
-                data.style = Some(final_style);
+            let (damage, restyle_result) =
+                self.compute_damage_and_cascade_pseudos(final_style,
+                                                        data,
+                                                        context,
+                                                        applicable_declarations,
+                                                        &mut applicable_declarations_cache);
 
-                <Self::ConcreteElement as Element>::Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
-                    let applicable_declarations_for_this_pseudo =
-                        applicable_declarations.per_pseudo.get(&pseudo).unwrap();
-
-                    if !applicable_declarations_for_this_pseudo.is_empty() {
-                        // NB: Transitions and animations should only work for
-                        // pseudo-elements ::before and ::after
-                        let should_animate_properties =
-                            <Self::ConcreteElement as Element>::Impl::pseudo_is_before_or_after(&pseudo);
-                        let (new_damage, style) = self.cascade_node_pseudo_element(
-                            context,
-                            Some(data.style.as_ref().unwrap()),
-                            &*applicable_declarations_for_this_pseudo,
-                            data.per_pseudo.get_mut(&pseudo),
-                            &mut applicable_declarations_cache,
-                            false,
-                            should_animate_properties);
-                        data.per_pseudo.insert(pseudo, style);
-
-                        damage = damage | new_damage;
-                    }
-                });
-
-                damage
-            };
-
-            // This method needs to borrow the data as mutable, so make sure data_ref goes out of
-            // scope first.
             self.set_can_be_fragmented(parent.map_or(false, |p| {
                 p.can_be_fragmented() ||
                 parent_style.as_ref().unwrap().is_multicol()
             }));
+
+            (damage, restyle_result)
+        };
+
+
+        // This method needs to borrow the data as mutable, so make sure
+        // data_ref goes out of scope first.
+        self.set_restyle_damage(damage);
+
+        restyle_result
+    }
+
+    fn compute_damage_and_cascade_pseudos<'a, Ctx>(&self,
+                                                   final_style: Arc<ComputedValues>,
+                                                   data: &mut PrivateStyleData,
+                                                   context: &Ctx,
+                                                   applicable_declarations: &ApplicableDeclarations,
+                                                   mut applicable_declarations_cache: &mut ApplicableDeclarationsCache)
+                                                   -> (Self::ConcreteRestyleDamage, RestyleResult)
+        where Ctx: StyleContext<'a>
+    {
+        // Here we optimise the case of the style changing but both the
+        // previous and the new styles having display: none. In this
+        // case, we can always optimize the traversal, regardless of the
+        // restyle hint.
+        let this_display = final_style.get_box().clone_display();
+        if this_display == display::T::none {
+            let old_display = data.style.as_ref().map(|old_style| {
+                old_style.get_box().clone_display()
+            });
+
+            // If display passed from none to something, then we need to reflow,
+            // otherwise, we don't do anything.
+            let damage = match old_display {
+                Some(display) if display == this_display => {
+                    Self::ConcreteRestyleDamage::empty()
+                }
+                _ => {
+                    Self::ConcreteRestyleDamage::rebuild_and_reflow()
+                }
+            };
+
+            debug!("Short-circuiting traversal: {:?} {:?} {:?}",
+                   this_display, old_display, damage);
+
+            data.style = Some(final_style);
+            return (damage, RestyleResult::Stop);
         }
 
-        // This method needs to borrow the data as mutable, so make sure data_ref goes out of
-        // scope first.
-        self.set_restyle_damage(damage);
+        // Otherwise, we just compute the damage normally, and sum up the damage
+        // related to pseudo-elements.
+        let mut damage =
+            self.compute_restyle_damage(data.style.as_ref(), &final_style);
+
+        data.style = Some(final_style);
+
+        // FIXME(emilio): This is not pretty, and in the Gecko case means
+        // effectively comparing with the old computed values (given our style
+        // source is the old nsStyleContext).
+        //
+        // We should be diffing the old pseudo-element styles with the new ones,
+        // see https://bugzilla.mozilla.org/show_bug.cgi?id=1293399.
+        //
+        // For now we do the following, which preserves the old Servo behavior.
+        let existing_style =
+            self.existing_style_for_restyle_damage(data.style.as_ref());
+
+        let data_per_pseudo = &mut data.per_pseudo;
+        let new_style = data.style.as_ref();
+
+        debug_assert!(new_style.is_some());
+
+        let rebuild_and_reflow =
+            Self::ConcreteRestyleDamage::rebuild_and_reflow();
+
+        debug_assert!(existing_style.is_some() || damage == rebuild_and_reflow);
+
+        <Self::ConcreteElement as Element>::Impl::each_eagerly_cascaded_pseudo_element(|pseudo| {
+            let applicable_declarations_for_this_pseudo =
+                applicable_declarations.per_pseudo.get(&pseudo).unwrap();
+
+            if !applicable_declarations_for_this_pseudo.is_empty() {
+                // NB: Transitions and animations should only work for
+                // pseudo-elements ::before and ::after
+                let should_animate_properties =
+                    <Self::ConcreteElement as Element>::Impl::pseudo_is_before_or_after(&pseudo);
+
+                let new_pseudo_style =
+                    self.cascade_node_pseudo_element(context,
+                                                     new_style,
+                                                     &*applicable_declarations_for_this_pseudo,
+                                                     data_per_pseudo.get_mut(&pseudo),
+                                                     &mut applicable_declarations_cache,
+                                                     /* shareable = */ false,
+                                                     should_animate_properties);
+
+                // No point in computing more damage if we're already doing all
+                // the work.
+                if damage != rebuild_and_reflow {
+                    let new_damage =
+                        Self::ConcreteRestyleDamage::compute(existing_style.unwrap(),
+                                                             &new_pseudo_style);
+                    damage = damage | new_damage;
+                }
+                data_per_pseudo.insert(pseudo, new_pseudo_style);
+            }
+        });
+
+        (damage, RestyleResult::Continue)
     }
 }
 

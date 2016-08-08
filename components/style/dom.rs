@@ -16,6 +16,7 @@ use selector_impl::{ElementExt, SelectorImplExt};
 use selectors::Element;
 use selectors::matching::DeclarationBlock;
 use sink::Push;
+use std::fmt::Debug;
 use std::ops::BitOr;
 use std::sync::Arc;
 use string_cache::{Atom, Namespace};
@@ -45,7 +46,7 @@ impl OpaqueNode {
     }
 }
 
-pub trait TRestyleDamage : BitOr<Output=Self> + Copy {
+pub trait TRestyleDamage : Debug + PartialEq + BitOr<Output=Self> + Copy {
     /// The source for our current computed values in the cascade. This is a
     /// ComputedValues in Servo and a StyleContext in Gecko.
     ///
@@ -56,8 +57,10 @@ pub trait TRestyleDamage : BitOr<Output=Self> + Copy {
     /// This should be obtained via TNode::existing_style_for_restyle_damage
     type PreExistingComputedValues;
 
-    fn compute(old: Option<&Self::PreExistingComputedValues>,
+    fn compute(old: &Self::PreExistingComputedValues,
                new: &Arc<ComputedValues>) -> Self;
+
+    fn empty() -> Self;
 
     fn rebuild_and_reflow() -> Self;
 }
