@@ -27,7 +27,7 @@ use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::slice::Iter;
 use std::sync::Arc;
 use string_cache::{Atom, Namespace};
-use traversal::ForceTraversalStop;
+use traversal::RestyleResult;
 use util::opts;
 
 fn create_common_style_affecting_attributes_from_element<E: TElement>(element: &E)
@@ -360,7 +360,7 @@ pub enum StyleSharingResult<ConcreteRestyleDamage: TRestyleDamage> {
     CannotShare,
     /// The node's style can be shared. The integer specifies the index in the
     /// LRU cache that was hit and the damage that was done.
-    StyleWasShared(usize, ConcreteRestyleDamage, ForceTraversalStop),
+    StyleWasShared(usize, ConcreteRestyleDamage, RestyleResult),
 }
 
 trait PrivateMatchMethods: TNode
@@ -594,15 +594,15 @@ pub trait ElementMatchMethods : TElement {
                     damage
                 };
 
-                let should_stop = if shared_style.get_box().clone_display() == display::T::none {
-                    ForceTraversalStop::Force
+                let restyle_result = if shared_style.get_box().clone_display() == display::T::none {
+                    RestyleResult::Stop
                 } else {
-                    ForceTraversalStop::DontForce
+                    RestyleResult::Continue
                 };
 
                 *style = Some(shared_style);
 
-                return StyleSharingResult::StyleWasShared(i, damage, should_stop)
+                return StyleSharingResult::StyleWasShared(i, damage, restyle_result)
             }
         }
 
@@ -666,7 +666,7 @@ pub trait MatchMethods : TNode {
                                     context: &Ctx,
                                     parent: Option<Self>,
                                     applicable_declarations: &ApplicableDeclarations)
-                                    -> ForceTraversalStop
+                                    -> RestyleResult
         where Ctx: StyleContext<'a>
     {
         // Get our parent's style. This must be unsafe so that we don't touch the parent's
@@ -685,7 +685,7 @@ pub trait MatchMethods : TNode {
         let mut applicable_declarations_cache =
             context.local_context().applicable_declarations_cache.borrow_mut();
 
-        let (damage, should_stop) = if self.is_text_node() {
+        let (damage, restyle_result) = if self.is_text_node() {
             let mut data_ref = self.mutate_data().unwrap();
             let mut data = &mut *data_ref;
             let cloned_parent_style = ComputedValues::style_for_child_text_node(parent_style.unwrap());
@@ -699,7 +699,7 @@ pub trait MatchMethods : TNode {
 
             data.style = Some(cloned_parent_style);
 
-            (damage, ForceTraversalStop::DontForce)
+            (damage, RestyleResult::Continue)
         } else {
             let mut data_ref = self.mutate_data().unwrap();
             let mut data = &mut *data_ref;
@@ -711,7 +711,7 @@ pub trait MatchMethods : TNode {
                                                  applicable_declarations.normal_shareable,
                                                  /* should_animate = */ true);
 
-            let (damage, should_stop) =
+            let (damage, restyle_result) =
                 self.compute_damage_and_cascade_pseudos(final_style,
                                                         data,
                                                         context,
@@ -723,7 +723,7 @@ pub trait MatchMethods : TNode {
                 parent_style.as_ref().unwrap().is_multicol()
             }));
 
-            (damage, should_stop)
+            (damage, restyle_result)
         };
 
 
@@ -731,7 +731,7 @@ pub trait MatchMethods : TNode {
         // data_ref goes out of scope first.
         self.set_restyle_damage(damage);
 
-        should_stop
+        restyle_result
     }
 
     fn compute_damage_and_cascade_pseudos<'a, Ctx>(&self,
@@ -740,7 +740,7 @@ pub trait MatchMethods : TNode {
                                                    context: &Ctx,
                                                    applicable_declarations: &ApplicableDeclarations,
                                                    mut applicable_declarations_cache: &mut ApplicableDeclarationsCache)
-                                                   -> (Self::ConcreteRestyleDamage, ForceTraversalStop)
+                                                   -> (Self::ConcreteRestyleDamage, RestyleResult)
         where Ctx: StyleContext<'a>
     {
         // Here we optimise the case of the style changing but both the
@@ -768,7 +768,7 @@ pub trait MatchMethods : TNode {
                    this_display, old_display, damage);
 
             data.style = Some(final_style);
-            return (damage, ForceTraversalStop::Force);
+            return (damage, RestyleResult::Stop);
         }
 
         // Otherwise, we just compute the damage normally, and sum up the damage
@@ -824,7 +824,7 @@ pub trait MatchMethods : TNode {
             }
         });
 
-        (damage, ForceTraversalStop::DontForce)
+        (damage, RestyleResult::Continue)
     }
 }
 

@@ -5,7 +5,7 @@
 //! Implements sequential traversal over the DOM tree.
 
 use dom::TNode;
-use traversal::{ForceTraversalStop, DomTraversalContext};
+use traversal::{RestyleResult, DomTraversalContext};
 
 pub fn traverse_dom<N, C>(root: N,
                           shared: &C::SharedContext)
@@ -18,8 +18,8 @@ pub fn traverse_dom<N, C>(root: N,
     {
         debug_assert!(context.should_process(node));
         let should_stop = match context.process_preorder(node) {
-            ForceTraversalStop::Force => true,
-            ForceTraversalStop::DontForce => false,
+            RestyleResult::Stop => true,
+            RestyleResult::Continue => false,
         };
 
         if !should_stop {

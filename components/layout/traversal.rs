@@ -16,7 +16,7 @@ use std::mem;
 use style::context::SharedStyleContext;
 use style::dom::TNode;
 use style::selector_impl::ServoSelectorImpl;
-use style::traversal::ForceTraversalStop;
+use style::traversal::RestyleResult;
 use style::traversal::{DomTraversalContext, remove_from_bloom_filter, recalc_style_at};
 use util::opts;
 use wrapper::{LayoutNodeLayoutData, ThreadSafeLayoutNodeHelpers};
@@ -70,7 +70,7 @@ impl<'lc, N> DomTraversalContext<N> for RecalcStyleAndConstructFlows<'lc>
         }
     }
 
-    fn process_preorder(&self, node: N) -> ForceTraversalStop {
+    fn process_preorder(&self, node: N) -> RestyleResult {
         // FIXME(pcwalton): Stop allocating here. Ideally this should just be
         // done by the HTML parser.
         node.initialize_data();

@@ -11,7 +11,7 @@
 use dom::{OpaqueNode, TNode, UnsafeNode};
 use std::mem;
 use std::sync::atomic::Ordering;
-use traversal::{ForceTraversalStop, DomTraversalContext};
+use traversal::{RestyleResult, DomTraversalContext};
 use workqueue::{WorkQueue, WorkUnit, WorkerProxy};
 
 #[allow(dead_code)]
@@ -69,8 +69,8 @@ fn top_down_dom<N, C>(unsafe_nodes: UnsafeNodeList,
 
         // Perform the appropriate traversal.
         let should_stop = match context.process_preorder(node) {
-            ForceTraversalStop::Force => true,
-            ForceTraversalStop::DontForce => false,
+            RestyleResult::Stop => true,
+            RestyleResult::Continue => false,
         };
 
         // Possibly enqueue the children.
